@@ -1,0 +1,111 @@
+# GitLab CI template for Semgrep SAST
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage: add to your project's .gitlab-ci.yml:
+#
+#   include:
+#     - project: 'security/semgrep-cicd'
+#       ref: main
+#       file: '/templates/gitlab-semgrep.yml'
+#
+#   stages:
+#     - scan
+#     - build
+#     - deploy
+#
+#   variables:
+#     SEMGREP_RULES_REPO: "security/semgrep-cicd"
+#     SEMGREP_RULES_REF: "main"
+#     SEMGREP_FAIL_ON_FINDINGS: "true"
+# ─────────────────────────────────────────────────────────────────────────────
+
+variables:
+  SEMGREP_RULES_REPO:
+    value: "security/semgrep-cicd"
+    description: "GitLab project path of the shared Semgrep rules repo"
+  SEMGREP_RULES_REF:
+    value: "main"
+    description: "Branch or tag of the rules repo to clone"
+  SEMGREP_FAIL_ON_FINDINGS:
+    value: "true"
+    description: "Set to 'false' to warn without failing the pipeline"
+
+semgrep_scan:
+  stage: scan
+  image: semgrep/semgrep:latest
+  variables:
+    GIT_STRATEGY: fetch
+    GIT_DEPTH: "1"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    - echo "==> Cloning shared rules: ${SEMGREP_RULES_REPO}@${SEMGREP_RULES_REF}"
+    - |
+      git clone \
+        --depth 1 \
+        --branch "${SEMGREP_RULES_REF}" \
+        "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${SEMGREP_RULES_REPO}.git" \
+        /tmp/semgrep-rules
+    - echo "==> Rules cloned. Files:"
+    - find /tmp/semgrep-rules/rules -name "*.yml" | sort
+  script:
+    - |
+      echo "==> Starting Semgrep SAST scan..."
+      echo "    Project:  ${CI_PROJECT_PATH}"
+      echo "    Commit:   ${CI_COMMIT_SHORT_SHA}"
+      echo "    Ref:      ${CI_COMMIT_REF_NAME}"
+      echo "    Fail on:  ${SEMGREP_FAIL_ON_FINDINGS}"
+
+      BASE_ARGS="
+        --config auto
+        --config /tmp/semgrep-rules/rules
+        --gitlab-sast
+        --output gl-sast-report.json
+        --exclude node_modules
+        --exclude dist
+        --exclude build
+        --exclude .next
+        --exclude .nuxt
+        --exclude coverage
+        --exclude generated
+        --exclude .turbo
+        --no-rewrite-rule-ids
+        --verbose
+        .
+      "
+
+      if [ "$SEMGREP_FAIL_ON_FINDINGS" = "true" ]; then
+        echo "==> Mode: FAIL pipeline on findings"
+        semgrep scan --error $BASE_ARGS
+        EXIT_CODE=$?
+      else
+        echo "==> Mode: WARN only — pipeline will not fail"
+        semgrep scan $BASE_ARGS || true
+        EXIT_CODE=0
+      fi
+
+      echo "==> Scan complete. Exit code: ${EXIT_CODE}"
+
+      if [ -f gl-sast-report.json ]; then
+        FINDING_COUNT=$(python3 -c "
+      import json, sys
+      try:
+          data = json.load(open('gl-sast-report.json'))
+          vulns = data.get('vulnerabilities', [])
+          print(len(vulns))
+      except Exception:
+          print('0')
+      " 2>/dev/null || echo "0")
+        echo "==> Total findings in report: ${FINDING_COUNT}"
+      fi
+
+      exit $EXIT_CODE
+  artifacts:
+    name: "semgrep-sast-${CI_COMMIT_SHORT_SHA}"
+    when: always
+    expire_in: 30 days
+    reports:
+      sast: gl-sast-report.json
+    paths:
+      - gl-sast-report.json
+  allow_failure: false

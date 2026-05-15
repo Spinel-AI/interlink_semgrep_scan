@@ -1,0 +1,249 @@
+rules:
+  # ──────────────────────────────────────────────
+  # IMAGE & BUILD HYGIENE
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.no-latest-tag
+    patterns:
+      - pattern: FROM $IMAGE:latest
+    message: >
+      `FROM image:latest` uses a floating tag that changes between builds, causing
+      non-reproducible images. A base image update may silently introduce breaking changes
+      or pull in a compromised image version.
+      Pin to an exact version: `node:20.11.1-alpine3.19`.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: best-practice
+      cwe: CWE-829
+
+  - id: dockerfile.no-version-tag
+    patterns:
+      - pattern: FROM $IMAGE
+      - pattern-not: FROM $IMAGE:$TAG
+      - pattern-not: FROM $IMAGE@$DIGEST
+      - pattern-not: FROM scratch
+    message: >
+      `FROM image` with no tag defaults to `:latest`, which is non-reproducible and
+      may pull a different image on each build.
+      Always specify a version tag: `FROM node:20.11.1-alpine`.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: best-practice
+      cwe: CWE-829
+
+  - id: dockerfile.pin-by-digest
+    patterns:
+      - pattern: FROM $IMAGE:$TAG
+      - pattern-not: FROM $IMAGE@sha256:...
+    message: >
+      Consider pinning the base image by digest (`FROM image@sha256:...`) for fully
+      reproducible builds. Tag-based pinning still allows the tag to be overwritten.
+      Use `docker pull image:tag` and note the digest for production Dockerfiles.
+    languages: [dockerfile]
+    severity: INFO
+    metadata:
+      category: best-practice
+      cwe: CWE-829
+
+  # ──────────────────────────────────────────────
+  # SECRETS IN BUILD ARGS / ENV
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.secrets-in-env
+    patterns:
+      - pattern-either:
+          - pattern: ENV $NAME=...
+          - pattern: ENV $NAME ...
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '(?i)(secret|password|passwd|token|api_key|apikey|private_key|access_key|auth_token|jwt_secret|db_pass|database_password|client_secret)'
+    message: >
+      Secrets or passwords are set as ENV variables in the Dockerfile.
+      ENV values are baked into the image layers and are visible via `docker inspect` and
+      `docker history` — anyone with image access can read them.
+      Use Docker BuildKit secrets (`--mount=type=secret`) or inject at runtime via
+      environment variables in `docker run` or Kubernetes secrets.
+    languages: [dockerfile]
+    severity: ERROR
+    metadata:
+      category: secrets
+      cwe: CWE-798
+
+  - id: dockerfile.secrets-in-arg
+    patterns:
+      - pattern: ARG $NAME
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '(?i)(secret|password|passwd|token|api_key|apikey|private_key|access_key|auth_token|jwt_secret)'
+    message: >
+      Build arguments (`ARG`) used for secrets are stored in the image build history
+      and visible via `docker history --no-trunc`.
+      Use Docker BuildKit secret mounts instead:
+      `RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: secrets
+      cwe: CWE-798
+
+  # ──────────────────────────────────────────────
+  # USER / PRIVILEGE
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.no-root-user
+    pattern: USER root
+    message: >
+      Container is explicitly set to run as `root`.
+      Running as root means any container escape or vulnerability gives the attacker
+      full root access on the host (depending on security configuration).
+      Create a non-root user and switch to it before the final CMD/ENTRYPOINT:
+      `RUN addgroup -S app && adduser -S app -G app` then `USER app`.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-250
+      owasp: "A05:2021 - Security Misconfiguration"
+
+  - id: dockerfile.no-user-directive
+    patterns:
+      - pattern: FROM $IMAGE
+      - pattern-not-inside: |
+          FROM $IMAGE
+          ...
+          USER $USER
+          ...
+    message: >
+      No `USER` directive found after the last `FROM`. The container will run as root by default.
+      Add a `USER <non-root-user>` instruction before `CMD`/`ENTRYPOINT`.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-250
+
+  # ──────────────────────────────────────────────
+  # REMOTE CODE EXECUTION IN BUILD
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.curl-pipe-sh
+    patterns:
+      - pattern-either:
+          - pattern: RUN curl ... | sh
+          - pattern: RUN curl ... | bash
+          - pattern: RUN wget ... | sh
+          - pattern: RUN wget ... | bash
+          - pattern: RUN curl $URL | sh
+          - pattern: RUN curl $URL | bash
+          - pattern: RUN wget $URL | sh
+          - pattern: RUN wget $URL | bash
+    message: >
+      `curl | sh` or `wget | bash` downloads and executes a remote script without
+      any verification. This is a significant supply-chain attack vector — if the URL is
+      compromised (DNS hijack, CDN compromise, MITM), arbitrary code runs during the build.
+      Download the script first, verify its checksum, then execute:
+      `RUN curl -o setup.sh https://... && sha256sum -c setup.sh.sha256 && sh setup.sh`.
+    languages: [dockerfile]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-494
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+
+  - id: dockerfile.apt-no-version-pin
+    patterns:
+      - pattern: RUN apt-get install $PACKAGES
+      - pattern-not: RUN apt-get install $P=$V
+    message: >
+      `apt-get install` without version pinning installs the latest available package,
+      which may change between builds. Pin versions for reproducibility:
+      `apt-get install nginx=1.25.3-1~bookworm`.
+    languages: [dockerfile]
+    severity: INFO
+    metadata:
+      category: best-practice
+
+  # ──────────────────────────────────────────────
+  # FILE / COPY SAFETY
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.prefer-copy-over-add
+    patterns:
+      - pattern: ADD $SRC $DEST
+      - pattern-not: ADD $URL $DEST
+    message: >
+      Use `COPY` instead of `ADD` for copying local files.
+      `ADD` has additional behaviors (auto-extract archives, fetch remote URLs) that are
+      rarely needed and make the build less predictable.
+      `COPY` is explicit, auditable, and preferred by Docker best practices.
+    languages: [dockerfile]
+    severity: INFO
+    metadata:
+      category: best-practice
+
+  - id: dockerfile.copy-all-context
+    patterns:
+      - pattern: COPY . $DEST
+    message: >
+      `COPY . <dest>` copies the entire build context, which may include sensitive files
+      (`.env`, `*.pem`, `id_rsa`, `node_modules`).
+      Use a `.dockerignore` file to exclude sensitive and unnecessary files, or
+      copy only what is needed: `COPY src/ ./src/ && COPY package.json .`.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-200
+
+  # ──────────────────────────────────────────────
+  # NETWORK EXPOSURE
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.expose-sensitive-port
+    patterns:
+      - pattern-either:
+          - pattern: EXPOSE 22
+          - pattern: EXPOSE 23
+          - pattern: EXPOSE 3306
+          - pattern: EXPOSE 5432
+          - pattern: EXPOSE 6379
+          - pattern: EXPOSE 27017
+          - pattern: EXPOSE 9200
+          - pattern: EXPOSE 9300
+          - pattern: EXPOSE 2375
+          - pattern: EXPOSE 2376
+          - pattern: EXPOSE 4444
+    message: >
+      A sensitive port is being exposed:
+      22 (SSH), 23 (Telnet), 3306 (MySQL), 5432 (PostgreSQL), 6379 (Redis),
+      27017 (MongoDB), 9200/9300 (Elasticsearch), 2375/2376 (Docker daemon), 4444 (common backdoor).
+      Internal services should not expose these ports in the container image.
+      Restrict access using network policies or Docker network configurations instead.
+    languages: [dockerfile]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-200
+      owasp: "A05:2021 - Security Misconfiguration"
+
+  # ──────────────────────────────────────────────
+  # HEALTHCHECK
+  # ──────────────────────────────────────────────
+
+  - id: dockerfile.missing-healthcheck
+    patterns:
+      - pattern: CMD $CMD
+      - pattern-not-inside: |
+          ...
+          HEALTHCHECK ...
+          ...
+    message: >
+      No `HEALTHCHECK` instruction found. Without a health check, Docker and orchestrators
+      (Kubernetes, ECS) cannot detect when the container is unhealthy and needs to be replaced.
+      Add: `HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:3000/health || exit 1`.
+    languages: [dockerfile]
+    severity: INFO
+    metadata:
+      category: best-practice

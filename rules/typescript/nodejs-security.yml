@@ -1,0 +1,368 @@
+rules:
+  # ──────────────────────────────────────────────
+  # CODE EXECUTION
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.no-eval
+    pattern: eval(...)
+    message: >
+      `eval()` executes arbitrary code from a string and is a critical security risk.
+      If user-controlled input reaches eval(), it leads to Remote Code Execution (RCE).
+      Replace with JSON.parse() for JSON data, or refactor to avoid dynamic code execution entirely.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-95
+      owasp: "A03:2021 - Injection"
+
+  - id: ts.security.no-new-function
+    pattern: new Function(...)
+    message: >
+      `new Function()` is equivalent to `eval()` — it compiles and executes a string as code.
+      This can lead to Remote Code Execution if the argument contains user input.
+      Refactor to use typed functions or a safe expression evaluator.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-95
+      owasp: "A03:2021 - Injection"
+
+  - id: ts.security.vm-execution
+    pattern-either:
+      - pattern: $VM.runInNewContext(...)
+      - pattern: $VM.runInThisContext(...)
+      - pattern: $VM.runInContext(...)
+      - pattern: vm.runInNewContext(...)
+      - pattern: vm.runInThisContext(...)
+      - pattern: vm.runInContext(...)
+    message: >
+      Node.js `vm` module methods execute arbitrary code strings. While sandboxed from the Node module
+      system, they do not prevent all attack vectors and can be escaped in certain configurations.
+      Ensure the input is never derived from user-controlled data.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-95
+
+  - id: ts.security.settimeout-string-eval
+    pattern-either:
+      - pattern: setTimeout("...", ...)
+      - pattern: setInterval("...", ...)
+    message: >
+      Calling `setTimeout` or `setInterval` with a string argument evaluates that string as code,
+      identical to `eval()`. Use a function reference instead:
+      `setTimeout(() => myFunc(), delay)`.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-95
+
+  # ──────────────────────────────────────────────
+  # INJECTION
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.sql-injection-template
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(`... ${$INPUT} ...`)
+          - pattern: $DB.raw(`... ${$INPUT} ...`)
+          - pattern: $REPO.query(`... ${$INPUT} ...`)
+          - pattern: $CONN.execute(`... ${$INPUT} ...`)
+    message: >
+      SQL query built using template literals with interpolated variables.
+      This is vulnerable to SQL Injection if `$INPUT` originates from user input.
+      Use parameterized queries: `db.query('SELECT * FROM users WHERE id = ?', [id])`.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-89
+      owasp: "A03:2021 - Injection"
+
+  - id: ts.security.sql-injection-concat
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query("..." + $INPUT + "...")
+          - pattern: $DB.query("..." + $INPUT)
+          - pattern: $DB.raw("..." + $INPUT)
+    message: >
+      SQL query built by string concatenation. This is vulnerable to SQL Injection.
+      Use parameterized queries or a query builder with bound parameters.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-89
+      owasp: "A03:2021 - Injection"
+
+  - id: ts.security.nosql-injection
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.find({$KEY: $REQ.params.$VAL})
+          - pattern: $MODEL.find({$KEY: $REQ.query.$VAL})
+          - pattern: $MODEL.find({$KEY: $REQ.body.$VAL})
+          - pattern: $MODEL.findOne({$KEY: $REQ.body.$VAL})
+          - pattern: $MODEL.findOne({$KEY: $REQ.query.$VAL})
+    message: >
+      MongoDB query uses unvalidated request input directly as a query value.
+      An attacker can pass `{ "$gt": "" }` to bypass filters (NoSQL Injection).
+      Validate and sanitize input before using it in a query, and avoid accepting operator objects.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-943
+      owasp: "A03:2021 - Injection"
+
+  - id: ts.security.child-process-exec
+    pattern-either:
+      - pattern: exec(...)
+      - pattern: child_process.exec(...)
+      - pattern: $CP.exec(...)
+    message: >
+      `exec()` passes the command to a shell, making it vulnerable to Command Injection
+      if any part of the command string comes from user input.
+      Use `execFile()` or `spawn()` with an argument array to avoid shell interpretation.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-78
+      owasp: "A03:2021 - Injection"
+
+  # ──────────────────────────────────────────────
+  # PATH TRAVERSAL
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.path-traversal-params
+    pattern-either:
+      - pattern: fs.readFileSync($REQ.params.$F)
+      - pattern: fs.readFile($REQ.params.$F, ...)
+      - pattern: fs.createReadStream($REQ.params.$F)
+      - pattern: fs.readFileSync($REQ.query.$F)
+      - pattern: fs.readFile($REQ.query.$F, ...)
+      - pattern: fs.createReadStream($REQ.query.$F)
+      - pattern: fs.readFileSync($REQ.body.$F)
+      - pattern: fs.readFile($REQ.body.$F, ...)
+    message: >
+      File system operation uses unvalidated user input as a path.
+      An attacker can supply `../../etc/passwd` to read arbitrary files (Path Traversal).
+      Validate the path with `path.resolve()` and confirm it is within the expected base directory.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-22
+      owasp: "A01:2021 - Broken Access Control"
+
+  # ──────────────────────────────────────────────
+  # OPEN REDIRECT / SSRF
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.open-redirect
+    pattern-either:
+      - pattern: res.redirect($REQ.params.$URL)
+      - pattern: res.redirect($REQ.query.$URL)
+      - pattern: res.redirect($REQ.body.$URL)
+    message: >
+      `res.redirect()` called with an unvalidated user-supplied URL.
+      An attacker can redirect users to a malicious site (Open Redirect / Phishing).
+      Validate the redirect target against an allowlist of trusted URLs or paths.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-601
+      owasp: "A01:2021 - Broken Access Control"
+
+  - id: ts.security.ssrf-fetch
+    pattern-either:
+      - pattern: fetch($REQ.params.$URL, ...)
+      - pattern: fetch($REQ.query.$URL, ...)
+      - pattern: fetch($REQ.body.$URL, ...)
+    message: >
+      `fetch()` called with a URL derived from user input — Server-Side Request Forgery (SSRF) risk.
+      An attacker can force the server to make requests to internal services or cloud metadata endpoints.
+      Validate the URL against an allowlist of trusted domains before making the request.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-918
+      owasp: "A10:2021 - Server-Side Request Forgery"
+
+  - id: ts.security.ssrf-axios
+    pattern-either:
+      - pattern: axios.get($REQ.params.$URL, ...)
+      - pattern: axios.get($REQ.query.$URL, ...)
+      - pattern: axios.get($REQ.body.$URL, ...)
+      - pattern: axios.post($REQ.body.$URL, ...)
+      - pattern: axios.post($REQ.query.$URL, ...)
+    message: >
+      `axios` request target is derived from user input — SSRF risk.
+      Validate the URL against an allowlist of permitted hosts before issuing the request.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-918
+      owasp: "A10:2021 - Server-Side Request Forgery"
+
+  # ──────────────────────────────────────────────
+  # PROTOTYPE POLLUTION
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.prototype-pollution
+    pattern-either:
+      - pattern: $OBJ["__proto__"] = $VAL
+      - pattern: $OBJ.__proto__ = $VAL
+      - pattern: Object.prototype[$KEY] = $VAL
+      - pattern: Object.prototype.$KEY = $VAL
+    message: >
+      Direct assignment to `__proto__` or `Object.prototype` can pollute the prototype chain,
+      potentially affecting all objects in the application and bypassing security checks.
+      Use `Object.create(null)` for safe dictionaries or validate keys against a fixed allowlist.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-915
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+
+  # ──────────────────────────────────────────────
+  # INSECURE DESERIALIZATION
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.insecure-deserialize
+    pattern-either:
+      - pattern: serialize.unserialize(...)
+      - pattern: $S.unserialize(...)
+      - pattern: deserialize($INPUT)
+      - pattern: fromJSON($INPUT, ...)
+    message: >
+      Insecure deserialization can lead to Remote Code Execution.
+      The `node-serialize` package's `unserialize()` executes embedded IIFE functions.
+      Use a safe alternative like `JSON.parse()` with schema validation (e.g., Joi, Zod).
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-502
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+
+  # ──────────────────────────────────────────────
+  # CRYPTOGRAPHY
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.jwt-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: jwt.sign($PAYLOAD, "...")
+          - pattern: jwt.sign($PAYLOAD, '...')
+          - pattern: $JWT.sign($PAYLOAD, "...")
+          - pattern: $JWT.sign($PAYLOAD, '...')
+    message: >
+      JWT is signed with a hardcoded string literal secret.
+      Hardcoded secrets are exposed in source code, logs, and git history.
+      Read the secret from an environment variable or secrets manager:
+      `jwt.sign(payload, process.env.JWT_SECRET)`.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-798
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: ts.security.weak-hash
+    pattern-either:
+      - pattern: crypto.createHash('md5')
+      - pattern: crypto.createHash("md5")
+      - pattern: crypto.createHash('sha1')
+      - pattern: crypto.createHash("sha1")
+    message: >
+      MD5 and SHA1 are cryptographically broken and must not be used for security-sensitive
+      purposes (password hashing, data integrity, digital signatures).
+      Use SHA-256 or SHA-3 for hashing, and bcrypt/argon2 for password storage.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-327
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: ts.security.weak-cipher
+    pattern-either:
+      - pattern: crypto.createCipher(...)
+      - pattern: crypto.createDecipher(...)
+    message: >
+      `crypto.createCipher` and `crypto.createDecipher` are deprecated because they use a
+      hardcoded IV of zero, making the encryption vulnerable to known-plaintext attacks.
+      Use `crypto.createCipheriv` with a cryptographically random IV.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: CWE-326
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  - id: ts.security.insecure-random
+    patterns:
+      - pattern: Math.random()
+      - pattern-not-inside: |
+          console.log(...)
+      - pattern-not-inside: |
+          test(...)
+      - pattern-not-inside: |
+          it(...)
+      - pattern-not-inside: |
+          describe(...)
+    message: >
+      `Math.random()` is a pseudo-random number generator, not cryptographically secure.
+      Do not use it for tokens, session IDs, nonces, or any security-sensitive value.
+      Use `crypto.randomBytes()` or `crypto.randomUUID()` instead.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: CWE-338
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  # ──────────────────────────────────────────────
+  # BEST PRACTICES
+  # ──────────────────────────────────────────────
+
+  - id: ts.security.direct-process-env
+    pattern: process.env.$KEY
+    message: >
+      Avoid reading `process.env` directly in business logic.
+      In NestJS, use `ConfigService` for centralized, type-safe, and mockable configuration:
+      `this.configService.get<string>('DATABASE_URL')`.
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: best-practice
+      framework: nestjs
+
+  - id: ts.security.no-console-log
+    pattern: console.log(...)
+    message: >
+      `console.log()` should not appear in production source code.
+      Use a structured logger with log levels (winston, pino, NestJS Logger) to avoid
+      leaking sensitive data in production and to enable log level filtering.
+    languages: [typescript, javascript]
+    severity: WARNING
+    paths:
+      exclude:
+        - "**/*.test.ts"
+        - "**/*.spec.ts"
+        - "**/*.test.js"
+        - "**/*.spec.js"
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+    metadata:
+      category: best-practice
