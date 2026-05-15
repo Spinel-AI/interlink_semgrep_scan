@@ -110,7 +110,7 @@ variables:
 **Scan with Semgrep default ruleset:**
 
 ```bash
-docker run --rm -v "${PWD}:/src" semgrep/semgrep semgrep scan --config auto /src
+docker run --rm -v "${PWD}:/src" semgrep/semgrep:1.162.0 semgrep scan --config auto /src
 ```
 
 **Scan with both default and custom rules from this repo:**
