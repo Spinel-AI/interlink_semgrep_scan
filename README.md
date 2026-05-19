@@ -26,8 +26,11 @@ In CI/CD, Semgrep acts as a **security gate** at the very start of the pipeline.
 security/semgrep-cicd
 ├── README.md
 ├── .semgrepignore
+├── .github/
+│   └── workflows/
+│       └── semgrep.yml                  # Reusable GitHub Actions workflow
 ├── templates/
-│   └── gitlab-semgrep.yml               # Shared GitLab CI template
+│   └── gitlab-semgrep.yml               # GitLab CI template (if using GitLab)
 └── rules/
     ├── typescript/
     │   ├── nodejs-security.yml          # Core security rules (eval, JWT, injection)
@@ -39,68 +42,76 @@ security/semgrep-cicd
 
 ---
 
-## Integrating into a GitLab Project
+## Integrating into a GitHub Project
 
-### Step 1: Add `include` to `.gitlab-ci.yml`
+GitHub uses **Reusable Workflows** — other repos call this workflow directly instead of copying it.
 
-```yaml
-include:
-  - project: 'security/semgrep-cicd'
-    ref: main
-    file: '/templates/gitlab-semgrep.yml'
-
-stages:
-  - scan
-  - validate
-  - build
-  - deploy
-
-variables:
-  SEMGREP_RULES_REPO: "security/semgrep-cicd"
-  SEMGREP_RULES_REF: "main"
-  SEMGREP_FAIL_ON_FINDINGS: "true"
-```
-
-> **Important**: The `scan` stage must appear before `build`. The `semgrep_scan` job runs automatically at the `scan` stage.
-
-### Step 2 (Optional): Make build depend on scan
+### Step 1: Create `.github/workflows/ci.yml` in your project
 
 ```yaml
-build:
-  stage: build
-  needs:
-    - job: semgrep_scan
-      artifacts: false
-  script:
-    - npm run build
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  security-scan:
+    uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+    with:
+      fail-on-findings: true
+    secrets: inherit
+
+  build:
+    needs: security-scan      # build only runs after scan passes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run build
 ```
+
+> Replace `YOUR_ORG` with your GitHub organization name.
+
+### Step 2: Allow access to the rules repo
+
+If `semgrep-cicd` is a **private repo**, go to:
+`Settings → Actions → General → Access → Allow access from other repos in the org`
+
+Or create a PAT and store it as a secret `SEMGREP_RULES_TOKEN` in each project.
 
 ---
 
-## Configuration Variables
+## Workflow Inputs
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SEMGREP_RULES_REPO` | `security/semgrep-cicd` | GitLab path to the shared rules repo |
-| `SEMGREP_RULES_REF` | `main` | Branch or tag of the rules repo |
-| `SEMGREP_FAIL_ON_FINDINGS` | `true` | `true` = fail pipeline on findings; `false` = warn only |
+| Input | Default | Description |
+|-------|---------|-------------|
+| `fail-on-findings` | `true` | `true` = fail workflow on findings; `false` = warn only |
+| `rules-ref` | `main` | Branch or tag of this repo to use |
 
 ---
 
 ## Enable / Disable Pipeline Failure
 
-**Fail pipeline on findings (default — recommended for production):**
+**Fail on findings (default — recommended for production):**
 
 ```yaml
-variables:
-  SEMGREP_FAIL_ON_FINDINGS: "true"
+jobs:
+  security-scan:
+    uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+    with:
+      fail-on-findings: true
 ```
 
-**Warn only, do not fail (use when onboarding a new project):**
+**Warn only — use when onboarding a new project:**
 
 ```yaml
-variables:
-  SEMGREP_FAIL_ON_FINDINGS: "false"
+jobs:
+  security-scan:
+    uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+    with:
+      fail-on-findings: false
 ```
 
 ---
@@ -110,7 +121,7 @@ variables:
 **Scan with Semgrep default ruleset:**
 
 ```bash
-docker run --rm -v "${PWD}:/src" semgrep/semgrep semgrep scan --config auto /src
+docker run --rm -v "${PWD}:/src" semgrep/semgrep:1.162.0 semgrep scan --config auto /src
 ```
 
 **Scan with both default and custom rules from this repo:**
