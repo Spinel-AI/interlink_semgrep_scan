@@ -59,7 +59,7 @@ on:
 
 jobs:
   security-scan:
-    uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+    uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
     with:
       fail-on-findings: true
     secrets: inherit
@@ -72,11 +72,11 @@ jobs:
       - run: npm run build
 ```
 
-> Replace `YOUR_ORG` with your GitHub organization name.
+
 
 ### Step 2: Allow access to the rules repo
 
-If `semgrep-cicd` is a **private repo**, go to:
+If `interlink_semgrep_scan` is a **private repo**, go to:
 `Settings → Actions → General → Access → Allow access from other repos in the org`
 
 Or create a PAT and store it as a secret `SEMGREP_RULES_TOKEN` in each project.
@@ -99,7 +99,7 @@ Or create a PAT and store it as a secret `SEMGREP_RULES_TOKEN` in each project.
 ```yaml
 jobs:
   security-scan:
-    uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+    uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
     with:
       fail-on-findings: true
 ```
@@ -109,7 +109,7 @@ jobs:
 ```yaml
 jobs:
   security-scan:
-    uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+    uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
     with:
       fail-on-findings: false
 ```
@@ -128,7 +128,7 @@ docker run --rm -v "${PWD}:/src" semgrep/semgrep:1.162.0 semgrep scan --config a
 
 ```bash
 # Clone this repo first
-git clone git@gitlab.com:security/semgrep-cicd.git /tmp/semgrep-rules
+git clone git@github.com:Spinel-AI/interlink_semgrep_scan.git /tmp/semgrep-rules
 
 # Run with all rules
 semgrep scan --config auto --config /tmp/semgrep-rules/rules .
