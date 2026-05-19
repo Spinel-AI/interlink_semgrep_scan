@@ -1,0 +1,95 @@
+# Reusable GitHub Actions workflow for Semgrep SAST
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage: call this from any repo in the same org:
+#
+#   jobs:
+#     security-scan:
+#       uses: YOUR_ORG/semgrep-cicd/.github/workflows/semgrep.yml@main
+#       with:
+#         fail-on-findings: true
+#       secrets: inherit
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Semgrep SAST
+
+on:
+  workflow_call:
+    inputs:
+      fail-on-findings:
+        description: "Fail the workflow if Semgrep finds any issues"
+        type: boolean
+        default: true
+      rules-ref:
+        description: "Branch or tag of the semgrep-cicd rules repo to use"
+        type: string
+        default: "main"
+
+jobs:
+  semgrep_scan:
+    name: Semgrep SAST Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # required to upload SARIF to GitHub Security tab
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Checkout Semgrep rules
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/semgrep-cicd
+          ref: ${{ inputs.rules-ref }}
+          path: .semgrep-rules
+          # GITHUB_TOKEN works if both repos are in the same org and semgrep-cicd is not private
+          # For private repos: create a PAT and store as secret SEMGREP_RULES_TOKEN
+          token: ${{ secrets.SEMGREP_RULES_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Run Semgrep scan
+        id: semgrep
+        run: |
+          echo "==> Starting Semgrep SAST scan"
+          echo "    Repository:  ${{ github.repository }}"
+          echo "    Commit:      ${{ github.sha }}"
+          echo "    Ref:         ${{ github.ref_name }}"
+          echo "    Fail on:     ${{ inputs.fail-on-findings }}"
+
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/src" \
+            semgrep/semgrep:1.162.0 \
+            semgrep scan \
+              --config auto \
+              --config /src/.semgrep-rules/rules \
+              --sarif \
+              --output /src/semgrep.sarif \
+              --exclude node_modules \
+              --exclude dist \
+              --exclude build \
+              --exclude .next \
+              --exclude .nuxt \
+              --exclude coverage \
+              --exclude generated \
+              --exclude .turbo \
+              --no-rewrite-rule-ids \
+              ${{ inputs.fail-on-findings && '--error' || '' }} \
+              /src
+
+          EXIT_CODE=$?
+          echo "==> Scan complete. Exit code: ${EXIT_CODE}"
+          exit $EXIT_CODE
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()  # upload even if scan found issues
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Upload SARIF as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-sarif-${{ github.sha }}
+          path: semgrep.sarif
+          retention-days: 30
