@@ -102,11 +102,11 @@ rules:
   - id: ts.security.nosql-injection
     patterns:
       - pattern-either:
-          - pattern: $MODEL.find({$KEY: $REQ.params.$VAL})
-          - pattern: $MODEL.find({$KEY: $REQ.query.$VAL})
-          - pattern: $MODEL.find({$KEY: $REQ.body.$VAL})
-          - pattern: $MODEL.findOne({$KEY: $REQ.body.$VAL})
-          - pattern: $MODEL.findOne({$KEY: $REQ.query.$VAL})
+          - pattern: "$MODEL.find({$KEY: $REQ.params.$VAL})"
+          - pattern: "$MODEL.find({$KEY: $REQ.query.$VAL})"
+          - pattern: "$MODEL.find({$KEY: $REQ.body.$VAL})"
+          - pattern: "$MODEL.findOne({$KEY: $REQ.body.$VAL})"
+          - pattern: "$MODEL.findOne({$KEY: $REQ.query.$VAL})"
     message: >
       MongoDB query uses unvalidated request input directly as a query value.
       An attacker can pass `{ "$gt": "" }` to bypass filters (NoSQL Injection).
