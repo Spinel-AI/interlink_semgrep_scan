@@ -100,8 +100,9 @@ jobs:
           exit $EXIT_CODE
 
       - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
+        continue-on-error: true  # private repos without Advanced Security will fail here
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -208,10 +209,17 @@ jobs:
           import json
           try:
               data = json.load(open('semgrep.sarif'))
+              rule_levels = {}
+              for run in data.get('runs', []):
+                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
+                      rid = rule.get('id', '')
+                      level = rule.get('defaultConfiguration', {}).get('level', 'none')
+                      rule_levels[rid] = level
               count = 0
               for run in data.get('runs', []):
                   for r in run.get('results', []):
-                      if r.get('level','') in ('error',):
+                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
+                      if level == 'error':
                           count += 1
               print(count)
           except: print(0)
@@ -221,10 +229,17 @@ jobs:
           import json
           try:
               data = json.load(open('semgrep.sarif'))
+              rule_levels = {}
+              for run in data.get('runs', []):
+                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
+                      rid = rule.get('id', '')
+                      level = rule.get('defaultConfiguration', {}).get('level', 'none')
+                      rule_levels[rid] = level
               count = 0
               for run in data.get('runs', []):
                   for r in run.get('results', []):
-                      if r.get('level','') == 'warning':
+                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
+                      if level == 'warning':
                           count += 1
               print(count)
           except: print(0)
@@ -258,15 +273,22 @@ jobs:
           except: print(0)
           " 2>/dev/null || echo "0")
 
-            # Top 5 most critical findings
+            # Top 10 most critical findings (errors only)
             TOP_FINDINGS=$(python3 -c "
           import json
           try:
               data = json.load(open('semgrep.sarif'))
+              rule_levels = {}
+              for run in data.get('runs', []):
+                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
+                      rid = rule.get('id', '')
+                      level = rule.get('defaultConfiguration', {}).get('level', 'none')
+                      rule_levels[rid] = level
               lines = []
               for run in data.get('runs', []):
                   for r in run.get('results', []):
-                      if r.get('level','') == 'error':
+                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
+                      if level == 'error':
                           rid = r.get('ruleId', 'unknown')
                           locs = r.get('locations', [{}])
                           uri = locs[0].get('physicalLocation', {}).get('artifactLocation', {}).get('uri', '') if locs else ''
@@ -274,7 +296,6 @@ jobs:
                           lines.append(f'  ▸ {rid}')
                           if uri:
                               lines.append(f'    {uri}:{line}')
-              # deduplicate rule IDs
               seen = set()
               deduped = []
               for l in lines:
