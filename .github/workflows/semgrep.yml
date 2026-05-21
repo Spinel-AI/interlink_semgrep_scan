@@ -86,6 +86,16 @@ jobs:
               /src
 
           EXIT_CODE=$?
+          echo "semgrep_exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+          # Exit code 1 = findings found (when --error flag is used)
+          # Exit code >1 = scan error (config, docker, etc.)
+          if [ "$EXIT_CODE" -gt 1 ]; then
+            echo "scan_error=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "scan_error=false" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "==> Scan complete. Exit code: ${EXIT_CODE}"
           exit $EXIT_CODE
 
@@ -259,6 +269,8 @@ jobs:
 
           # ── Build message ─────────────────────────────────────────────────
           SHORT_SHA="$(printf '%s' "$COMMIT_SHA" | cut -c1-7)"
+          SCAN_ERROR="${{ steps.semgrep.outputs.scan_error || 'false' }}"
+          SEMGREP_EXIT="${{ steps.semgrep.outputs.semgrep_exit_code || '0' }}"
 
           if [ "$SCAN_STATUS" = "success" ] && [ "$TOTAL" = "0" ]; then
             STATUS_ICON="✅"
@@ -266,6 +278,9 @@ jobs:
           elif [ "$SCAN_STATUS" = "success" ] && [ "$TOTAL" != "0" ]; then
             STATUS_ICON="⚠️"
             STATUS_TEXT="PASSED (warnings only)"
+          elif [ "$SCAN_ERROR" = "true" ]; then
+            STATUS_ICON="🔧"
+            STATUS_TEXT="SCAN ERROR — Semgrep failed to run (exit code: ${SEMGREP_EXIT})"
           else
             STATUS_ICON="🚨"
             STATUS_TEXT="FAILED — Security issues detected"
