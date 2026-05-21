@@ -11,6 +11,9 @@ on:
 jobs:
   security-scan:
     name: Security Scan (Semgrep)
+    permissions:
+      contents: read
+      security-events: write
     uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
     with:
       fail-on-findings: true
