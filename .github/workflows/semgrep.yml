@@ -131,6 +131,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ── Skip if scan passed cleanly with 0 findings ───────────────────
+          SCAN_STATUS_EARLY="${{ job.status }}"
+          if [ "$SCAN_STATUS_EARLY" = "success" ]; then
+            SARIF_TOTAL=0
+            if [ -f semgrep.sarif ]; then
+              SARIF_TOTAL=$(python3 -c "
+          import json
+          try:
+              data=json.load(open('semgrep.sarif'))
+              print(sum(len(r.get('results',[])) for r in data.get('runs',[])))
+          except: print(0)
+          " 2>/dev/null || echo "0")
+            fi
+            if [ "$SARIF_TOTAL" = "0" ]; then
+              echo "Scan clean with 0 findings — skipping Telegram notification."
+              exit 0
+            fi
+          fi
+
           # ── Validate Telegram credentials ──────────────────────────────────
           BOT_TOKEN="$(printf '%s' "${TELEGRAM_BOT_TOKEN:-}" \
             | tr -d '\r\n ' \
