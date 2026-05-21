@@ -4,6 +4,9 @@
 #
 #   jobs:
 #     security-scan:
+#       permissions:
+#         contents: read
+#         security-events: write
 #       uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
 #       with:
 #         fail-on-findings: true
@@ -23,6 +26,15 @@ on:
         description: "Branch or tag of the semgrep-cicd rules repo to use"
         type: string
         default: "main"
+    secrets:
+      SEMGREP_RULES_TOKEN:
+        required: false
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+      TELEGRAM_MESSAGE_THREAD_ID:
+        required: false
 
 jobs:
   semgrep_scan:
@@ -30,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write  # required to upload SARIF to GitHub Security tab
+      security-events: write
 
     steps:
       - name: Checkout source code
@@ -39,11 +51,9 @@ jobs:
       - name: Checkout Semgrep rules
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/semgrep-cicd
+          repository: ${{ github.repository_owner }}/interlink_semgrep_scan
           ref: ${{ inputs.rules-ref }}
           path: .semgrep-rules
-          # GITHUB_TOKEN works if both repos are in the same org and semgrep-cicd is not private
-          # For private repos: create a PAT and store as secret SEMGREP_RULES_TOKEN
           token: ${{ secrets.SEMGREP_RULES_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Run Semgrep scan
@@ -81,7 +91,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
-        if: always()  # upload even if scan found issues
+        if: always()
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -93,3 +103,224 @@ jobs:
           name: semgrep-sarif-${{ github.sha }}
           path: semgrep.sarif
           retention-days: 30
+
+      - name: Notify Telegram
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
+          SCAN_STATUS: ${{ job.status }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'Manual trigger' }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # ── Validate Telegram credentials ──────────────────────────────────
+          BOT_TOKEN="$(printf '%s' "${TELEGRAM_BOT_TOKEN:-}" \
+            | tr -d '\r\n ' \
+            | sed 's/^"//;s/"$//' \
+            | sed "s/^'//;s/'$//" \
+            | sed 's#^https://api.telegram.org/bot##' \
+            | sed 's#/sendMessage$##' \
+            | sed 's/^bot//')"
+
+          CHAT_ID="$(printf '%s' "${TELEGRAM_CHAT_ID:-}" \
+            | tr -d '\r\n ' \
+            | sed 's/^"//;s/"$//' \
+            | sed "s/^'//;s/'$//")"
+
+          THREAD_ID="$(printf '%s' "${TELEGRAM_MESSAGE_THREAD_ID:-}" \
+            | tr -d '\r\n ' \
+            | sed 's/^"//;s/"$//' \
+            | sed "s/^'//;s/'$//")"
+
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "TELEGRAM_BOT_TOKEN is empty. Skip notification."
+            exit 0
+          fi
+
+          if [ -z "$CHAT_ID" ]; then
+            echo "TELEGRAM_CHAT_ID is empty. Skip notification."
+            exit 0
+          fi
+
+          if ! echo "$BOT_TOKEN" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$'; then
+            echo "TELEGRAM_BOT_TOKEN format invalid. Skip notification."
+            exit 0
+          fi
+
+          # ── Parse SARIF for finding counts ────────────────────────────────
+          TOTAL=0
+          ERROR_COUNT=0
+          WARNING_COUNT=0
+          MALWARE_COUNT=0
+          SECRETS_COUNT=0
+          TOP_FINDINGS=""
+
+          if [ -f semgrep.sarif ]; then
+            TOTAL=$(python3 -c "
+          import json, sys
+          try:
+              data = json.load(open('semgrep.sarif'))
+              results = []
+              for run in data.get('runs', []):
+                  results.extend(run.get('results', []))
+              print(len(results))
+          except: print(0)
+          " 2>/dev/null || echo "0")
+
+            ERROR_COUNT=$(python3 -c "
+          import json
+          try:
+              data = json.load(open('semgrep.sarif'))
+              count = 0
+              for run in data.get('runs', []):
+                  for r in run.get('results', []):
+                      if r.get('level','') in ('error',):
+                          count += 1
+              print(count)
+          except: print(0)
+          " 2>/dev/null || echo "0")
+
+            WARNING_COUNT=$(python3 -c "
+          import json
+          try:
+              data = json.load(open('semgrep.sarif'))
+              count = 0
+              for run in data.get('runs', []):
+                  for r in run.get('results', []):
+                      if r.get('level','') == 'warning':
+                          count += 1
+              print(count)
+          except: print(0)
+          " 2>/dev/null || echo "0")
+
+            MALWARE_COUNT=$(python3 -c "
+          import json
+          try:
+              data = json.load(open('semgrep.sarif'))
+              count = 0
+              for run in data.get('runs', []):
+                  for r in run.get('results', []):
+                      rid = r.get('ruleId', '')
+                      if 'malware' in rid.lower() or 'obfuscat' in rid.lower():
+                          count += 1
+              print(count)
+          except: print(0)
+          " 2>/dev/null || echo "0")
+
+            SECRETS_COUNT=$(python3 -c "
+          import json
+          try:
+              data = json.load(open('semgrep.sarif'))
+              count = 0
+              for run in data.get('runs', []):
+                  for r in run.get('results', []):
+                      rid = r.get('ruleId', '')
+                      if 'secret' in rid.lower():
+                          count += 1
+              print(count)
+          except: print(0)
+          " 2>/dev/null || echo "0")
+
+            # Top 5 most critical findings
+            TOP_FINDINGS=$(python3 -c "
+          import json
+          try:
+              data = json.load(open('semgrep.sarif'))
+              lines = []
+              for run in data.get('runs', []):
+                  for r in run.get('results', []):
+                      if r.get('level','') == 'error':
+                          rid = r.get('ruleId', 'unknown')
+                          locs = r.get('locations', [{}])
+                          uri = locs[0].get('physicalLocation', {}).get('artifactLocation', {}).get('uri', '') if locs else ''
+                          line = locs[0].get('physicalLocation', {}).get('region', {}).get('startLine', '') if locs else ''
+                          lines.append(f'  ▸ {rid}')
+                          if uri:
+                              lines.append(f'    {uri}:{line}')
+              # deduplicate rule IDs
+              seen = set()
+              deduped = []
+              for l in lines:
+                  if l not in seen:
+                      seen.add(l)
+                      deduped.append(l)
+              print('\n'.join(deduped[:10]))
+          except: print('')
+          " 2>/dev/null || echo "")
+          fi
+
+          # ── Build message ─────────────────────────────────────────────────
+          SHORT_SHA="$(printf '%s' "$COMMIT_SHA" | cut -c1-7)"
+
+          if [ "$SCAN_STATUS" = "success" ] && [ "$TOTAL" = "0" ]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="PASSED — No findings"
+          elif [ "$SCAN_STATUS" = "success" ] && [ "$TOTAL" != "0" ]; then
+            STATUS_ICON="⚠️"
+            STATUS_TEXT="PASSED (warnings only)"
+          else
+            STATUS_ICON="🚨"
+            STATUS_TEXT="FAILED — Security issues detected"
+          fi
+
+          # Extra alert for malware/secrets
+          ALERT_LINE=""
+          if [ "$MALWARE_COUNT" != "0" ]; then
+            ALERT_LINE="
+          ⚠️ <b>MALWARE / OBFUSCATED CODE DETECTED: ${MALWARE_COUNT} finding(s)</b>"
+          fi
+          if [ "$SECRETS_COUNT" != "0" ]; then
+            ALERT_LINE="${ALERT_LINE}
+          🔑 <b>HARDCODED SECRETS DETECTED: ${SECRETS_COUNT} finding(s)</b>"
+          fi
+
+          FINDINGS_SECTION=""
+          if [ -n "$TOP_FINDINGS" ]; then
+            FINDINGS_SECTION="
+          <b>Top findings:</b>
+          <pre>${TOP_FINDINGS}</pre>"
+          fi
+
+          MESSAGE="${STATUS_ICON} <b>Semgrep SAST ${STATUS_TEXT}</b>${ALERT_LINE}
+
+          <b>Repository:</b> ${REPO}
+          <b>Branch:</b> ${BRANCH}
+          <b>Commit:</b> <code>${SHORT_SHA}</code>
+          <b>Message:</b> ${COMMIT_MESSAGE}
+          <b>Triggered by:</b> ${ACTOR}
+
+          <b>Findings:</b> ${TOTAL} total | 🔴 ${ERROR_COUNT} errors | 🟡 ${WARNING_COUNT} warnings${FINDINGS_SECTION}
+
+          <a href=\"${RUN_URL}\">View GitHub Actions run</a>"
+
+          # ── Send to Telegram ──────────────────────────────────────────────
+          API_URL="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+
+          CURL_ARGS=(
+            -sS
+            -X POST
+            "$API_URL"
+            -d "chat_id=${CHAT_ID}"
+            -d "parse_mode=HTML"
+            -d "disable_web_page_preview=true"
+            --data-urlencode "text=${MESSAGE}"
+          )
+
+          if [ -n "$THREAD_ID" ]; then
+            CURL_ARGS+=(-d "message_thread_id=${THREAD_ID}")
+          fi
+
+          RESPONSE="$(curl "${CURL_ARGS[@]}")"
+          echo "Telegram response: $RESPONSE"
+
+          if ! echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "Telegram notification failed, but CI will not fail."
+          fi
