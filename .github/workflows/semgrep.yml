@@ -39,7 +39,7 @@ on:
 jobs:
   semgrep_scan:
     name: Semgrep SAST Scan
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       security-events: write
