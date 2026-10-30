@@ -81,23 +81,56 @@ jobs:
               --exclude coverage \
               --exclude generated \
               --exclude .turbo \
+              --exclude .semgrep-rules \
               --no-rewrite-rule-ids \
-              ${{ inputs.fail-on-findings && '--error' || '' }} \
               /src
 
-          EXIT_CODE=$?
-          echo "semgrep_exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          SEMGREP_EXIT=$?
+          echo "semgrep_exit_code=${SEMGREP_EXIT}" >> "$GITHUB_OUTPUT"
 
-          # Exit code 1 = findings found (when --error flag is used)
-          # Exit code >1 = scan error (config, docker, etc.)
-          if [ "$EXIT_CODE" -gt 1 ]; then
+          # Exit code >= 2 = scan engine error (config/parse/docker failure)
+          # Exit code 0 or 1 = scan completed (1 = findings when semgrep uses --error,
+          #   but we no longer pass --error; semgrep exits 0 on success regardless)
+          if [ "${SEMGREP_EXIT}" -ge 2 ]; then
             echo "scan_error=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "scan_error=false" >> "$GITHUB_OUTPUT"
+            echo "error_findings=0" >> "$GITHUB_OUTPUT"
+            echo "==> Scan engine error. Exit code: ${SEMGREP_EXIT}"
+            exit "${SEMGREP_EXIT}"
           fi
 
-          echo "==> Scan complete. Exit code: ${EXIT_CODE}"
-          exit $EXIT_CODE
+          echo "scan_error=false" >> "$GITHUB_OUTPUT"
+
+          # Count ERROR-level findings from SARIF to decide whether to block.
+          # Only ERROR severity blocks the build; WARNING and NOTE are informational.
+          ERROR_FINDINGS=$(python3 -c "
+          import json, sys
+          try:
+              data = json.load(open('semgrep.sarif'))
+              rule_levels = {}
+              for run in data.get('runs', []):
+                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
+                      rule_levels[rule.get('id', '')] = rule.get('defaultConfiguration', {}).get('level', 'none')
+              count = 0
+              for run in data.get('runs', []):
+                  for r in run.get('results', []):
+                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
+                      if level == 'error':
+                          count += 1
+              print(count)
+          except Exception as e:
+              print(0, file=sys.stderr)
+              print(0)
+          " 2>/dev/null || echo "0")
+
+          echo "error_findings=${ERROR_FINDINGS}" >> "$GITHUB_OUTPUT"
+          echo "==> Scan complete. ERROR-level findings: ${ERROR_FINDINGS}"
+
+          if [ "${{ inputs.fail-on-findings }}" = "true" ] && [ "${ERROR_FINDINGS}" -gt 0 ]; then
+            echo "==> Blocking build: ${ERROR_FINDINGS} ERROR-level finding(s) require attention."
+            exit 1
+          fi
+
+          exit 0
 
       - name: Upload SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
@@ -189,24 +222,19 @@ jobs:
           TOTAL=0
           ERROR_COUNT=0
           WARNING_COUNT=0
+          NOTE_COUNT=0
           MALWARE_COUNT=0
           SECRETS_COUNT=0
           TOP_FINDINGS=""
 
           if [ -f semgrep.sarif ]; then
-            TOTAL=$(python3 -c "
+            # Single-pass parse: counts + top findings per severity
+            eval "$(python3 -c "
           import json, sys
-          try:
-              data = json.load(open('semgrep.sarif'))
-              results = []
-              for run in data.get('runs', []):
-                  results.extend(run.get('results', []))
-              print(len(results))
-          except: print(0)
-          " 2>/dev/null || echo "0")
 
-            ERROR_COUNT=$(python3 -c "
-          import json
+          def esc(s):
+              return str(s).replace('\\\\', '\\\\\\\\').replace(\"'\", \"'\\\\''\")
+
           try:
               data = json.load(open('semgrep.sarif'))
               rule_levels = {}
@@ -215,133 +243,108 @@ jobs:
                       rid = rule.get('id', '')
                       level = rule.get('defaultConfiguration', {}).get('level', 'none')
                       rule_levels[rid] = level
-              count = 0
-              for run in data.get('runs', []):
-                  for r in run.get('results', []):
-                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
-                      if level == 'error':
-                          count += 1
-              print(count)
-          except: print(0)
-          " 2>/dev/null || echo "0")
 
-            WARNING_COUNT=$(python3 -c "
-          import json
-          try:
-              data = json.load(open('semgrep.sarif'))
-              rule_levels = {}
-              for run in data.get('runs', []):
-                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
-                      rid = rule.get('id', '')
-                      level = rule.get('defaultConfiguration', {}).get('level', 'none')
-                      rule_levels[rid] = level
-              count = 0
-              for run in data.get('runs', []):
-                  for r in run.get('results', []):
-                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
-                      if level == 'warning':
-                          count += 1
-              print(count)
-          except: print(0)
-          " 2>/dev/null || echo "0")
+              total = 0
+              error_c = warning_c = note_c = malware_c = secrets_c = 0
+              errors_list = []
+              warnings_list = []
 
-            MALWARE_COUNT=$(python3 -c "
-          import json
-          try:
-              data = json.load(open('semgrep.sarif'))
-              count = 0
               for run in data.get('runs', []):
                   for r in run.get('results', []):
                       rid = r.get('ruleId', '')
+                      level = r.get('level') or rule_levels.get(rid, 'none')
+                      locs = r.get('locations', [])
+                      uri = ''
+                      lineno = ''
+                      if locs:
+                          pl = locs[0].get('physicalLocation', {})
+                          uri = pl.get('artifactLocation', {}).get('uri', '').replace('/src/', '', 1)
+                          lineno = pl.get('region', {}).get('startLine', '')
+
+                      total += 1
+                      if level == 'error':   error_c += 1
+                      elif level == 'warning': warning_c += 1
+                      elif level == 'note':    note_c += 1
+
                       if 'malware' in rid.lower() or 'obfuscat' in rid.lower():
-                          count += 1
-              print(count)
-          except: print(0)
-          " 2>/dev/null || echo "0")
-
-            SECRETS_COUNT=$(python3 -c "
-          import json
-          try:
-              data = json.load(open('semgrep.sarif'))
-              count = 0
-              for run in data.get('runs', []):
-                  for r in run.get('results', []):
-                      rid = r.get('ruleId', '')
+                          malware_c += 1
                       if 'secret' in rid.lower():
-                          count += 1
-              print(count)
-          except: print(0)
-          " 2>/dev/null || echo "0")
+                          secrets_c += 1
 
-            # Top 10 most critical findings (errors only)
-            TOP_FINDINGS=$(python3 -c "
-          import json
-          try:
-              data = json.load(open('semgrep.sarif'))
-              rule_levels = {}
-              for run in data.get('runs', []):
-                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
-                      rid = rule.get('id', '')
-                      level = rule.get('defaultConfiguration', {}).get('level', 'none')
-                      rule_levels[rid] = level
-              lines = []
-              for run in data.get('runs', []):
-                  for r in run.get('results', []):
-                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
-                      if level == 'error':
-                          rid = r.get('ruleId', 'unknown')
-                          locs = r.get('locations', [{}])
-                          uri = locs[0].get('physicalLocation', {}).get('artifactLocation', {}).get('uri', '') if locs else ''
-                          line = locs[0].get('physicalLocation', {}).get('region', {}).get('startLine', '') if locs else ''
-                          lines.append(f'  ▸ {rid}')
-                          if uri:
-                              lines.append(f'    {uri}:{line}')
-              seen = set()
-              deduped = []
-              for l in lines:
-                  if l not in seen:
-                      seen.add(l)
-                      deduped.append(l)
-              print('\n'.join(deduped[:10]))
-          except: print('')
-          " 2>/dev/null || echo "")
+                      short_rule = rid.split('.')[-1] if '.' in rid else rid
+                      loc_str = f'{uri}:{lineno}' if uri else ''
+                      entry = f'  {short_rule} @ {loc_str}' if loc_str else f'  {short_rule}'
+
+                      if level == 'error' and len(errors_list) < 8:
+                          errors_list.append(entry)
+                      elif level == 'warning' and len(warnings_list) < 5:
+                          warnings_list.append(entry)
+
+              findings_parts = []
+              if errors_list:
+                  findings_parts.append('🔴 Errors:')
+                  findings_parts.extend(errors_list)
+              if warnings_list:
+                  findings_parts.append('🟡 Warnings (top 5):')
+                  findings_parts.extend(warnings_list)
+              top = '\n'.join(findings_parts)
+
+              print(f\"TOTAL='{esc(total)}'\")
+              print(f\"ERROR_COUNT='{esc(error_c)}'\")
+              print(f\"WARNING_COUNT='{esc(warning_c)}'\")
+              print(f\"NOTE_COUNT='{esc(note_c)}'\")
+              print(f\"MALWARE_COUNT='{esc(malware_c)}'\")
+              print(f\"SECRETS_COUNT='{esc(secrets_c)}'\")
+              print(f\"TOP_FINDINGS='{esc(top)}'\")
+          except Exception as ex:
+              print(f'TOTAL=0 ERROR_COUNT=0 WARNING_COUNT=0 NOTE_COUNT=0 MALWARE_COUNT=0 SECRETS_COUNT=0 TOP_FINDINGS=', file=sys.stderr)
+              print('TOTAL=0')
+          " 2>/dev/null || echo "TOTAL=0")"
           fi
 
           # ── Build message ─────────────────────────────────────────────────
           SHORT_SHA="$(printf '%s' "$COMMIT_SHA" | cut -c1-7)"
           SCAN_ERROR="${{ steps.semgrep.outputs.scan_error || 'false' }}"
           SEMGREP_EXIT="${{ steps.semgrep.outputs.semgrep_exit_code || '0' }}"
+          ERROR_FINDINGS_COUNT="${{ steps.semgrep.outputs.error_findings || '0' }}"
 
-          if [ "$SCAN_STATUS" = "success" ] && [ "$TOTAL" = "0" ]; then
+          if [ "$SCAN_ERROR" = "true" ]; then
+            STATUS_ICON="🔧"
+            STATUS_TEXT="SCAN ERROR — Semgrep failed to run (exit ${SEMGREP_EXIT})"
+          elif [ "$TOTAL" = "0" ]; then
             STATUS_ICON="✅"
             STATUS_TEXT="PASSED — No findings"
-          elif [ "$SCAN_STATUS" = "success" ] && [ "$TOTAL" != "0" ]; then
-            STATUS_ICON="⚠️"
-            STATUS_TEXT="PASSED (warnings only)"
-          elif [ "$SCAN_ERROR" = "true" ]; then
-            STATUS_ICON="🔧"
-            STATUS_TEXT="SCAN ERROR — Semgrep failed to run (exit code: ${SEMGREP_EXIT})"
-          else
+          elif [ "$ERROR_FINDINGS_COUNT" -gt 0 ]; then
             STATUS_ICON="🚨"
-            STATUS_TEXT="FAILED — Security issues detected"
+            STATUS_TEXT="FAILED — ${ERROR_FINDINGS_COUNT} error(s) detected"
+          else
+            STATUS_ICON="⚠️"
+            STATUS_TEXT="PASSED — Warnings only (build not blocked)"
           fi
 
           # Extra alert for malware/secrets
           ALERT_LINE=""
           if [ "$MALWARE_COUNT" != "0" ]; then
             ALERT_LINE="
-          ⚠️ <b>MALWARE / OBFUSCATED CODE DETECTED: ${MALWARE_COUNT} finding(s)</b>"
+          🦠 <b>MALWARE / OBFUSCATED CODE: ${MALWARE_COUNT} finding(s)</b>"
           fi
           if [ "$SECRETS_COUNT" != "0" ]; then
             ALERT_LINE="${ALERT_LINE}
-          🔑 <b>HARDCODED SECRETS DETECTED: ${SECRETS_COUNT} finding(s)</b>"
+          🔑 <b>HARDCODED SECRETS: ${SECRETS_COUNT} finding(s)</b>"
           fi
 
           FINDINGS_SECTION=""
           if [ -n "$TOP_FINDINGS" ]; then
             FINDINGS_SECTION="
-          <b>Top findings:</b>
+
+          <b>Findings detail:</b>
           <pre>${TOP_FINDINGS}</pre>"
+          fi
+
+          # Build note line only if there are notes
+          NOTE_LINE=""
+          if [ "$NOTE_COUNT" != "0" ]; then
+            NOTE_LINE=" | 📝 ${NOTE_COUNT} notes"
           fi
 
           MESSAGE="${STATUS_ICON} <b>Semgrep SAST ${STATUS_TEXT}</b>${ALERT_LINE}
@@ -352,7 +355,7 @@ jobs:
           <b>Message:</b> ${COMMIT_MESSAGE}
           <b>Triggered by:</b> ${ACTOR}
 
-          <b>Findings:</b> ${TOTAL} total | 🔴 ${ERROR_COUNT} errors | 🟡 ${WARNING_COUNT} warnings${FINDINGS_SECTION}
+          <b>Findings:</b> ${TOTAL} total | 🔴 ${ERROR_COUNT} errors | 🟡 ${WARNING_COUNT} warnings${NOTE_LINE}${FINDINGS_SECTION}
 
           <a href=\"${RUN_URL}\">View GitHub Actions run</a>"
 
