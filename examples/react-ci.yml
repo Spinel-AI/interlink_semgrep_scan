@@ -1,4 +1,9 @@
 # Copy this file to your project at: .github/workflows/ci.yml
+#
+# Requirement: the security-scan job runs on a SELF-HOSTED runner, pinned by the
+# reusable workflow and not overridable by callers. That runner must have both
+# `python3` and `docker` available or the job fails its preflight check. Without
+# a self-hosted runner registered, the job queues indefinitely.
 
 name: CI
 
@@ -16,8 +21,15 @@ jobs:
       security-events: write
     uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
     with:
+      # Only ERROR-severity findings block the build. WARNING and INFO are
+      # reported to Telegram and the Security tab but never fail the job.
       fail-on-findings: true
-    secrets: inherit
+    # Pass only the secrets this workflow declares. `secrets: inherit` would
+    # hand it every secret in your repository.
+    secrets:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
 
   test:
     name: Unit Tests

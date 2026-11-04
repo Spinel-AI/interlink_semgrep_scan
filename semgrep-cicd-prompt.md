@@ -1,5 +1,21 @@
 # Prompt cho Claude: Tạo repo Semgrep CI/CD dùng chung và tích hợp vào các project
 
+> **Historical document — not a description of current behaviour.**
+>
+> This is the original prompt used to create the repository. It records the
+> requirements as they stood then, and parts of it have since been superseded:
+>
+> - The sections below state that the pipeline fails "when there are findings"
+>   and show `semgrep scan --error`. Today **only ERROR-severity findings block
+>   a build**; WARNING and INFO are reported but never fail the job. See
+>   *Severity gating* in [README.md](README.md).
+> - The variables `SEMGREP_RULES_REPO`, `SEMGREP_RULES_REF` and
+>   `SEMGREP_FAIL_ON_FINDINGS` exist only in the GitLab template
+>   ([templates/gitlab-semgrep.yml](templates/gitlab-semgrep.yml)). The GitHub
+>   workflow takes the inputs `fail-on-findings` and `rules-ref`.
+>
+> For actual behaviour, read README.md and the workflow itself, not this file.
+
 ## Bối cảnh
 
 Tôi muốn tạo một repo riêng để quản lý cấu hình Semgrep dùng chung cho nhiều project. Sau đó, trong CI/CD của từng project, tôi muốn thêm bước scan code bằng Semgrep trước bước build.

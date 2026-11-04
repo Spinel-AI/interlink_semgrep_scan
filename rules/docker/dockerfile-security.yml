@@ -37,10 +37,15 @@ rules:
     patterns:
       - pattern: FROM $IMAGE:$TAG
       - pattern-not: FROM $IMAGE@sha256:...
+      # `FROM image:tag@sha256:...` is pinned and is the form Docker recommends.
+      # The digest is a separate AST node that neither $IMAGE nor $TAG absorbs,
+      # so it has to be matched explicitly or this rule flags a pinned image.
+      - pattern-not: FROM $IMAGE:$TAG@$DIGEST
     message: >
-      Consider pinning the base image by digest (`FROM image@sha256:...`) for fully
-      reproducible builds. Tag-based pinning still allows the tag to be overwritten.
-      Use `docker pull image:tag` and note the digest for production Dockerfiles.
+      Consider pinning the base image by digest (`FROM image:tag@sha256:...`) for
+      fully reproducible builds. Tag-based pinning still allows the tag to be
+      overwritten. Use `docker pull image:tag`, read the digest from
+      `docker inspect`, and record both in production Dockerfiles.
     languages: [dockerfile]
     severity: INFO
     metadata:
@@ -51,14 +56,11 @@ rules:
   # SECRETS IN BUILD ARGS / ENV
   # ──────────────────────────────────────────────
 
+  # `ENV $NAME=...` does not bind $NAME to the variable name in semgrep 1.162.0,
+  # so this rule never fired. Matched by regex over the instruction instead,
+  # which also covers the space-separated `ENV NAME value` form.
   - id: dockerfile.secrets-in-env
-    patterns:
-      - pattern-either:
-          - pattern: ENV $NAME=...
-          - pattern: ENV $NAME ...
-      - metavariable-regex:
-          metavariable: $NAME
-          regex: '(?i)(secret|password|passwd|token|api_key|apikey|private_key|access_key|auth_token|jwt_secret|db_pass|database_password|client_secret)'
+    pattern-regex: '(?mi)^[ \t]*ENV[ \t]+[A-Za-z0-9_]*(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|APIKEY|PRIVATE_?KEY|ACCESS_?KEY|AUTH_TOKEN|JWT_SECRET|DB_PASS|CLIENT_SECRET)[A-Za-z0-9_]*[ \t]*[= \t]'
     message: >
       Secrets or passwords are set as ENV variables in the Dockerfile.
       ENV values are baked into the image layers and are visible via `docker inspect` and
@@ -71,12 +73,15 @@ rules:
       category: secrets
       cwe: CWE-798
 
+  # metavariable-regex is implicitly anchored, so the bare alternation only
+  # matched exact names: `ARG API_KEY` hit while `ARG DB_PASSWORD` and
+  # `ARG MY_API_KEY` were missed. Wrapped in `.*` to match as a substring.
   - id: dockerfile.secrets-in-arg
     patterns:
       - pattern: ARG $NAME
       - metavariable-regex:
           metavariable: $NAME
-          regex: '(?i)(secret|password|passwd|token|api_key|apikey|private_key|access_key|auth_token|jwt_secret)'
+          regex: '(?i).*(secret|password|passwd|token|api_?key|private_?key|access_?key|auth_token|jwt_secret).*'
     message: >
       Build arguments (`ARG`) used for secrets are stored in the image build history
       and visible via `docker history --no-trunc`.
@@ -169,10 +174,15 @@ rules:
   # FILE / COPY SAFETY
   # ──────────────────────────────────────────────
 
+  # `pattern-not: ADD $URL $DEST` is the same shape as the positive pattern, so
+  # the rule negated itself and never fired. Remote sources are excluded by
+  # testing the bound source instead.
   - id: dockerfile.prefer-copy-over-add
     patterns:
       - pattern: ADD $SRC $DEST
-      - pattern-not: ADD $URL $DEST
+      - metavariable-regex:
+          metavariable: $SRC
+          regex: '^(?!https?://)(?!git@)(?!--).*'
     message: >
       Use `COPY` instead of `ADD` for copying local files.
       `ADD` has additional behaviors (auto-extract archives, fetch remote URLs) that are
@@ -232,13 +242,13 @@ rules:
   # HEALTHCHECK
   # ──────────────────────────────────────────────
 
+  # `CMD $CMD` does not bind the exec form (`CMD ["sh"]`), and semgrep has no
+  # way to assert a Dockerfile lacks an instruction entirely — `pattern-not-inside`
+  # needs an enclosing scope and a Dockerfile is flat. A whole-file regex with a
+  # negative lookahead expresses the absence, matching a CMD only when no
+  # HEALTHCHECK appears anywhere in the file.
   - id: dockerfile.missing-healthcheck
-    patterns:
-      - pattern: CMD $CMD
-      - pattern-not-inside: |
-          ...
-          HEALTHCHECK ...
-          ...
+    pattern-regex: '(?si)\A(?!.*HEALTHCHECK).*[\r\n][ \t]*CMD[ \t]'
     message: >
       No `HEALTHCHECK` instruction found. Without a health check, Docker and orchestrators
       (Kubernetes, ECS) cannot detect when the container is unhealthy and needs to be replaced.
