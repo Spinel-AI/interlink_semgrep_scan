@@ -1,3 +1,17 @@
+# Scope: local, ad-hoc `semgrep` runs inside THIS repository only.
+#
+# This file does NOT affect CI scans of your project. The reusable workflow
+# checks this repo out to `.semgrep-rules/`, while semgrep reads
+# `.semgrepignore` from the scan root — so this file is never consulted there.
+# CI exclusions live in the `--exclude` flags in
+# `.github/workflows/semgrep.yml`; change them there, not here.
+#
+# Three paths are deliberately NOT excluded in CI even though they appear
+# below, because each is a plausible place for a real credential to land:
+#   prisma/migrations/  seeded SQL can carry connection strings
+#   public/static/      committed .env files and keys end up here
+#   **/*.d.ts           cheap to scan, no reason to carve out
+
 node_modules/
 dist/
 build/

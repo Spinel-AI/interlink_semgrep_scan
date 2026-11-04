@@ -31,7 +31,9 @@ variables:
 
 semgrep_scan:
   stage: scan
-  image: semgrep/semgrep:1.162.0
+  # Pinned by digest: the :1.162.0 tag itself can be repointed on Docker Hub,
+  # and this container gets the project source mounted into it.
+  image: semgrep/semgrep:1.162.0@sha256:9349edbadf90c3f3c0c3f55867625354e89680e6fa10d9034042af52fdb0e0d0
   variables:
     GIT_STRATEGY: fetch
     GIT_DEPTH: "1"

@@ -103,7 +103,52 @@ Or create a PAT and store it as secret `SEMGREP_RULES_TOKEN` in each project.
 | `INFO` | No | Yes (count only) |
 
 A scan that cannot produce or parse a SARIF report fails the gate closed, so a
-broken scan is never reported as a clean build.
+broken scan is never reported as a clean build. This applies even when
+`fail-on-findings: false` — opting out of blocking on findings does not opt out
+of blocking on a scan that did not actually run.
+
+---
+
+## Runner Requirements
+
+The scan job is pinned to `runs-on: self-hosted` inside the reusable workflow.
+Callers **cannot override this** — a reusable workflow chooses its own runner.
+
+Your self-hosted runner must provide:
+
+| Tool | Used for |
+|------|----------|
+| `docker` | running the pinned Semgrep image |
+| `python3` | parsing the SARIF report to decide the gate |
+
+A `Verify runner prerequisites` step checks both before scanning and fails with
+an explicit error if either is missing, rather than letting the gate read zero
+findings and pass silently.
+
+If no self-hosted runner is registered for the repository, the job **queues
+indefinitely** with no error. That is the usual cause of a scan that never
+starts.
+
+---
+
+## Reproducibility and Data Flow
+
+Two properties worth knowing before relying on this as a merge gate:
+
+- The Semgrep container is pinned by digest, so the image cannot change
+  underneath a build.
+- The scan passes `--config auto`, which **fetches a ruleset from
+  `semgrep.dev` at scan time**. That ruleset is not pinned to a commit, so the
+  same code can pass today and block tomorrow, and the rules that block a build
+  are not reviewed in this repo. `--config auto` also requires Semgrep metrics
+  to stay enabled (`--metrics off` is rejected alongside it), which means scan
+  metadata leaves your network on every run, including for private repos.
+
+  To remove both properties, replace `--config auto` with named registry packs
+  (for example `--config p/typescript --config p/docker`) plus `--metrics off`,
+  or drop it entirely and rely only on `rules/` in this repo. Either change
+  narrows what the gate detects, so it is a deliberate policy decision rather
+  than a cleanup.
 
 ---
 

@@ -28,7 +28,7 @@ on:
   workflow_call:
     inputs:
       fail-on-findings:
-        description: "Fail the workflow when Semgrep reports ERROR-severity findings (WARNING and INFO never block)"
+        description: "Fail the workflow when Semgrep reports ERROR-severity findings (WARNING and INFO never block). A scan that cannot run or whose report cannot be parsed fails the job regardless of this setting."
         type: boolean
         default: true
       rules-ref:
@@ -99,7 +99,7 @@ jobs:
 
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/src" \
-            semgrep/semgrep:1.162.0 \
+            semgrep/semgrep:1.162.0@sha256:9349edbadf90c3f3c0c3f55867625354e89680e6fa10d9034042af52fdb0e0d0 \
             semgrep scan \
               --config auto \
               --config /src/.semgrep-rules/rules \
@@ -114,6 +114,17 @@ jobs:
               --exclude generated \
               --exclude .turbo \
               --exclude .semgrep-rules \
+              --exclude out \
+              --exclude .output \
+              --exclude .cache \
+              --exclude storybook-static \
+              --exclude vendor \
+              --exclude logs \
+              --exclude tmp \
+              --exclude temp \
+              --exclude '*.log' \
+              --exclude '*.min.js' \
+              --exclude '*.map' \
               --no-rewrite-rule-ids \
               /src
 
@@ -436,9 +447,16 @@ jobs:
             CURL_ARGS+=(-d "message_thread_id=${THREAD_ID}")
           fi
 
-          RESPONSE="$(curl "${CURL_ARGS[@]}")"
-          echo "Telegram response: $RESPONSE"
+          # Capture the transport failure instead of letting set -e abort here,
+          # otherwise the handler below is unreachable on DNS/TLS/connect errors
+          # and the step dies with no explanation of why no alert arrived.
+          CURL_RC=0
+          RESPONSE="$(curl "${CURL_ARGS[@]}")" || CURL_RC=$?
 
-          if ! echo "$RESPONSE" | grep -q '"ok":true'; then
-            echo "Telegram notification failed, but CI will not fail."
+          if [ "$CURL_RC" -ne 0 ]; then
+            echo "Telegram request failed to send (curl exit ${CURL_RC}). CI will not fail."
+          elif ! echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "Telegram rejected the message: ${RESPONSE}. CI will not fail."
+          else
+            echo "Telegram notification sent."
           fi
