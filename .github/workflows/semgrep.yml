@@ -58,12 +58,19 @@ jobs:
 
       - name: Run Semgrep scan
         id: semgrep
+        env:
+          # Pass user-controlled context values via env vars, never interpolate
+          # them directly into the shell script (shell injection via branch name).
+          GIT_REF_NAME: ${{ github.ref_name }}
+          GIT_REPOSITORY: ${{ github.repository }}
+          GIT_SHA: ${{ github.sha }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           echo "==> Starting Semgrep SAST scan"
-          echo "    Repository:  ${{ github.repository }}"
-          echo "    Commit:      ${{ github.sha }}"
-          echo "    Ref:         ${{ github.ref_name }}"
-          echo "    Fail on:     ${{ inputs.fail-on-findings }}"
+          echo "    Repository:  ${GIT_REPOSITORY}"
+          echo "    Commit:      ${GIT_SHA}"
+          echo "    Ref:         ${GIT_REF_NAME}"
+          echo "    Fail on:     ${FAIL_ON_FINDINGS}"
 
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/src" \
@@ -125,7 +132,7 @@ jobs:
           echo "error_findings=${ERROR_FINDINGS}" >> "$GITHUB_OUTPUT"
           echo "==> Scan complete. ERROR-level findings: ${ERROR_FINDINGS}"
 
-          if [ "${{ inputs.fail-on-findings }}" = "true" ] && [ "${ERROR_FINDINGS}" -gt 0 ]; then
+          if [ "${FAIL_ON_FINDINGS}" = "true" ] && [ "${ERROR_FINDINGS}" -gt 0 ]; then
             echo "==> Blocking build: ${ERROR_FINDINGS} ERROR-level finding(s) require attention."
             exit 1
           fi
