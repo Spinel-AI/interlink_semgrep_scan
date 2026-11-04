@@ -10,7 +10,16 @@
 #       uses: Spinel-AI/interlink_semgrep_scan/.github/workflows/semgrep.yml@main
 #       with:
 #         fail-on-findings: true
-#       secrets: inherit
+#       secrets:
+#         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+#         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+#         TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
+#
+# List the secrets explicitly as above. `secrets: inherit` also works but hands
+# this workflow every secret in the calling repository, which it does not need.
+#
+# This job runs on a self-hosted runner (pinned below, not overridable by the
+# caller). That runner must provide `python3` and `docker`.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Semgrep SAST
