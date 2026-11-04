@@ -91,8 +91,19 @@ Or create a PAT and store it as secret `SEMGREP_RULES_TOKEN` in each project.
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| `fail-on-findings` | boolean | `true` | Fail workflow if Semgrep finds any issues |
+| `fail-on-findings` | boolean | `true` | Fail workflow when `ERROR`-severity findings are reported. `WARNING` and `INFO` never block the build — they are reported to Telegram and the Security tab only. |
 | `rules-ref` | string | `main` | Branch or tag of this rules repo to use |
+
+### Severity gating
+
+| Severity | Blocks build | Notified |
+|----------|--------------|----------|
+| `ERROR` | Yes (when `fail-on-findings: true`) | Yes |
+| `WARNING` | No | Yes |
+| `INFO` | No | Yes (count only) |
+
+A scan that cannot produce or parse a SARIF report fails the gate closed, so a
+broken scan is never reported as a clean build.
 
 ---
 
@@ -270,8 +281,8 @@ docker run --rm -v "${PWD}:/src" semgrep/semgrep:1.162.0 semgrep scan --config a
 | Rule ID | Severity | Description |
 |---------|----------|-------------|
 | `ts.secrets.private-key` | ERROR | RSA/EC/DSA private key embedded in source |
-| `ts.secrets.aws-access-key-id` | ERROR | AWS Access Key ID (`AKIA...`) |
-| `ts.secrets.aws-secret-key-assignment` | ERROR | AWS Secret Access Key hardcoded |
+| `ts.secrets.aws-access-key-id` | ERROR | AWS Access Key ID (`AKIA`/`ASIA`/`ABIA`/`ACCA`). Resource unique IDs (`AROA`, `AIDA`, `ANPA`, `ANVA`) are public identifiers and are not flagged. |
+| `ts.secrets.aws-secret-key-assignment` | ERROR | AWS Secret Access Key hardcoded (exact 40-char `[A-Za-z0-9/+=]` format) |
 | `ts.secrets.credentials-in-url` | ERROR | Password in database connection URL |
 | `ts.secrets.github-token` | ERROR | GitHub token (`ghp_...`, `ghs_...`) |
 | `ts.secrets.gitlab-token` | ERROR | GitLab token (`glpat-...`) |

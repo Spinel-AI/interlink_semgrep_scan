@@ -19,7 +19,7 @@ on:
   workflow_call:
     inputs:
       fail-on-findings:
-        description: "Fail the workflow if Semgrep finds any issues"
+        description: "Fail the workflow when Semgrep reports ERROR-severity findings (WARNING and INFO never block)"
         type: boolean
         default: true
       rules-ref:
@@ -55,6 +55,22 @@ jobs:
           ref: ${{ inputs.rules-ref }}
           path: .semgrep-rules
           token: ${{ secrets.SEMGREP_RULES_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # The security gate parses SARIF with python3. If python3 were missing on a
+      # self-hosted runner the gate would read 0 findings and pass silently, so
+      # verify it up front and fail loudly instead.
+      - name: Verify runner prerequisites
+        run: |
+          MISSING=""
+          command -v python3 >/dev/null 2>&1 || MISSING="${MISSING} python3"
+          command -v docker  >/dev/null 2>&1 || MISSING="${MISSING} docker"
+
+          if [ -n "${MISSING}" ]; then
+            echo "::error::Runner is missing required tool(s):${MISSING}. Semgrep gate cannot run."
+            exit 1
+          fi
+
+          echo "==> Prerequisites OK ($(python3 --version 2>&1), $(docker --version 2>&1))"
 
       - name: Run Semgrep scan
         id: semgrep
@@ -107,27 +123,40 @@ jobs:
 
           echo "scan_error=false" >> "$GITHUB_OUTPUT"
 
+          if [ ! -f semgrep.sarif ]; then
+            echo "::error::Semgrep exited 0 but produced no SARIF report. Treating as scan error."
+            echo "scan_error=true" >> "$GITHUB_OUTPUT"
+            echo "error_findings=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
           # Count ERROR-level findings from SARIF to decide whether to block.
           # Only ERROR severity blocks the build; WARNING and NOTE are informational.
+          # No fallback to 0 here: an unreadable report must fail the gate closed,
+          # otherwise a parse failure would silently green-light a dirty repo.
           ERROR_FINDINGS=$(python3 -c "
           import json, sys
-          try:
-              data = json.load(open('semgrep.sarif'))
-              rule_levels = {}
-              for run in data.get('runs', []):
-                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
-                      rule_levels[rule.get('id', '')] = rule.get('defaultConfiguration', {}).get('level', 'none')
-              count = 0
-              for run in data.get('runs', []):
-                  for r in run.get('results', []):
-                      level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
-                      if level == 'error':
-                          count += 1
-              print(count)
-          except Exception as e:
-              print(0, file=sys.stderr)
-              print(0)
-          " 2>/dev/null || echo "0")
+          data = json.load(open('semgrep.sarif'))
+          rule_levels = {}
+          for run in data.get('runs', []):
+              for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
+                  rule_levels[rule.get('id', '')] = rule.get('defaultConfiguration', {}).get('level', 'none')
+          count = 0
+          for run in data.get('runs', []):
+              for r in run.get('results', []):
+                  level = r.get('level') or rule_levels.get(r.get('ruleId', ''), 'none')
+                  if level == 'error':
+                      count += 1
+          print(count)
+          ")
+          PARSE_RC=$?
+
+          if [ "${PARSE_RC}" -ne 0 ] || ! echo "${ERROR_FINDINGS}" | grep -Eq '^[0-9]+$'; then
+            echo "::error::Could not parse semgrep.sarif (rc=${PARSE_RC}, value='${ERROR_FINDINGS}'). Failing closed."
+            echo "scan_error=true" >> "$GITHUB_OUTPUT"
+            echo "error_findings=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           echo "error_findings=${ERROR_FINDINGS}" >> "$GITHUB_OUTPUT"
           echo "==> Scan complete. ERROR-level findings: ${ERROR_FINDINGS}"
@@ -240,7 +269,9 @@ jobs:
           import json, sys
 
           def esc(s):
-              return str(s).replace('\\\\', '\\\\\\\\').replace(\"'\", \"'\\\\''\")
+              # Only the single quote needs escaping inside a '...' shell string;
+              # backslashes are literal there and must be left alone.
+              return str(s).replace(\"'\", \"'\\\\''\")
 
           try:
               data = json.load(open('semgrep.sarif'))
@@ -255,6 +286,7 @@ jobs:
               error_c = warning_c = note_c = malware_c = secrets_c = 0
               errors_list = []
               warnings_list = []
+              seen_entries = set()
 
               for run in data.get('runs', []):
                   for r in run.get('results', []):
@@ -281,6 +313,12 @@ jobs:
                       short_rule = rid.split('.')[-1] if '.' in rid else rid
                       loc_str = f'{uri}:{lineno}' if uri else ''
                       entry = f'  {short_rule} @ {loc_str}' if loc_str else f'  {short_rule}'
+
+                      # Overlapping patterns can report the same rule at the same
+                      # spot twice; keep the message slots for distinct findings.
+                      if entry in seen_entries:
+                          continue
+                      seen_entries.add(entry)
 
                       if level == 'error' and len(errors_list) < 8:
                           errors_list.append(entry)
@@ -315,15 +353,21 @@ jobs:
           SEMGREP_EXIT="${{ steps.semgrep.outputs.semgrep_exit_code || '0' }}"
           ERROR_FINDINGS_COUNT="${{ steps.semgrep.outputs.error_findings || '0' }}"
 
+          # Order matters: the gate's own verdict is authoritative. Checking
+          # $TOTAL first would report "No findings" whenever the SARIF reparse
+          # here failed, even though the gate had already blocked the build.
           if [ "$SCAN_ERROR" = "true" ]; then
             STATUS_ICON="🔧"
             STATUS_TEXT="SCAN ERROR — Semgrep failed to run (exit ${SEMGREP_EXIT})"
-          elif [ "$TOTAL" = "0" ]; then
-            STATUS_ICON="✅"
-            STATUS_TEXT="PASSED — No findings"
           elif [ "$ERROR_FINDINGS_COUNT" -gt 0 ]; then
             STATUS_ICON="🚨"
             STATUS_TEXT="FAILED — ${ERROR_FINDINGS_COUNT} error(s) detected"
+          elif [ "$SCAN_STATUS" != "success" ]; then
+            STATUS_ICON="🔧"
+            STATUS_TEXT="JOB FAILED — see run log"
+          elif [ "$TOTAL" = "0" ]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="PASSED — No findings"
           else
             STATUS_ICON="⚠️"
             STATUS_TEXT="PASSED — Warnings only (build not blocked)"
