@@ -68,10 +68,13 @@ rules:
   - id: ts.security.sql-injection-template
     patterns:
       - pattern-either:
-          - pattern: $DB.query(`... ${$INPUT} ...`)
-          - pattern: $DB.raw(`... ${$INPUT} ...`)
-          - pattern: $REPO.query(`... ${$INPUT} ...`)
-          - pattern: $CONN.execute(`... ${$INPUT} ...`)
+          - pattern: $DB.query(`...`)
+          - pattern: $DB.raw(`...`)
+          - pattern: $DB.execute(`...`)
+      # The `... ${$INPUT} ...` template-literal syntax matches nothing in
+      # semgrep 1.162.0, which left this rule dead. Match any backtick query and
+      # require real interpolation by regex, so a constant query stays clean.
+      - pattern-regex: '\$\{'
     message: >
       SQL query built using template literals with interpolated variables.
       This is vulnerable to SQL Injection if `$INPUT` originates from user input.
@@ -119,10 +122,22 @@ rules:
       owasp: "A03:2021 - Injection"
 
   - id: ts.security.child-process-exec
+    # RegExp.prototype.exec has the same shape as child_process.exec, so the
+    # receiver is filtered rather than excluded wholesale: a blanket
+    # `pattern-not: $RX.exec($S)` also discarded real single-argument
+    # child_process calls.
     pattern-either:
-      - pattern: exec(...)
+      - patterns:
+          - pattern: exec(...)
+          - pattern-not: $X.exec(...)
       - pattern: child_process.exec(...)
-      - pattern: $CP.exec(...)
+      - patterns:
+          - pattern: $CP.exec(...)
+          - pattern-not: /.../.exec(...)
+          - pattern-not: new RegExp(...).exec(...)
+          - metavariable-regex:
+              metavariable: $CP
+              regex: '(?i)^(?!.*(regex|regexp|pattern|matcher))(?!.*rx$)(?!.*re$).*$'
     message: >
       `exec()` passes the command to a shell, making it vulnerable to Command Injection
       if any part of the command string comes from user input.
@@ -237,12 +252,14 @@ rules:
   # INSECURE DESERIALIZATION
   # ──────────────────────────────────────────────
 
+  # Scoped to `unserialize`, the node-serialize sink that actually executes
+  # embedded IIFEs. The former `deserialize($INPUT)` and `fromJSON($INPUT, ...)`
+  # patterns matched ordinary protobuf/Immutable/DTO helpers and blocked merges
+  # at ERROR, while inconsistently letting `User.fromJSON(raw, opts)` through.
   - id: ts.security.insecure-deserialize
     pattern-either:
-      - pattern: serialize.unserialize(...)
+      - pattern: unserialize(...)
       - pattern: $S.unserialize(...)
-      - pattern: deserialize($INPUT)
-      - pattern: fromJSON($INPUT, ...)
     message: >
       Insecure deserialization can lead to Remote Code Execution.
       The `node-serialize` package's `unserialize()` executes embedded IIFE functions.
@@ -268,8 +285,10 @@ rules:
     message: >
       JWT is signed with a hardcoded string literal secret.
       Hardcoded secrets are exposed in source code, logs, and git history.
-      Read the secret from an environment variable or secrets manager:
-      `jwt.sign(payload, process.env.JWT_SECRET)`.
+      Load the secret through your configuration layer or a secrets manager —
+      `jwt.sign(payload, this.configService.get<string>('JWT_SECRET'))` — rather
+      than reading `process.env` at the call site, which `ts.security.direct-process-env`
+      also reports.
     languages: [typescript, javascript]
     severity: ERROR
     metadata:
