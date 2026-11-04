@@ -27,7 +27,7 @@ variables:
     description: "Branch or tag of the rules repo to clone"
   SEMGREP_FAIL_ON_FINDINGS:
     value: "true"
-    description: "Set to 'false' to warn without failing the pipeline"
+    description: "Fail the pipeline on High/Critical findings (semgrep ERROR severity). Medium and Info never fail the pipeline. Set to 'false' to report without failing."
 
 semgrep_scan:
   stage: scan
@@ -74,32 +74,66 @@ semgrep_scan:
         .
       "
 
-      if [ "$SEMGREP_FAIL_ON_FINDINGS" = "true" ]; then
-        echo "==> Mode: FAIL pipeline on findings"
-        semgrep scan --error $BASE_ARGS
-        EXIT_CODE=$?
-      else
-        echo "==> Mode: WARN only — pipeline will not fail"
-        semgrep scan $BASE_ARGS || true
-        EXIT_CODE=0
+      # No --error here. It exits non-zero on ANY finding, which under GitLab's
+      # set -e would both abort before the summary below and fail the pipeline
+      # on Medium/Info findings. Severity gating is decided from the report.
+      SCAN_RC=0
+      semgrep scan $BASE_ARGS || SCAN_RC=$?
+
+      # Semgrep exits >= 2 on an engine error (bad config, parse failure).
+      if [ "$SCAN_RC" -ge 2 ]; then
+        echo "==> Semgrep engine error (exit ${SCAN_RC}). Failing the pipeline."
+        exit "$SCAN_RC"
       fi
 
-      echo "==> Scan complete. Exit code: ${EXIT_CODE}"
-
-      if [ -f gl-sast-report.json ]; then
-        FINDING_COUNT=$(python3 -c "
-      import json, sys
-      try:
-          data = json.load(open('gl-sast-report.json'))
-          vulns = data.get('vulnerabilities', [])
-          print(len(vulns))
-      except Exception:
-          print('0')
-      " 2>/dev/null || echo "0")
-        echo "==> Total findings in report: ${FINDING_COUNT}"
+      if [ ! -f gl-sast-report.json ]; then
+        echo "==> Semgrep produced no report. Failing closed."
+        exit 1
       fi
 
-      exit $EXIT_CODE
+      # semgrep 1.162.0 maps ERROR -> High, WARNING -> Medium, INFO -> Info in
+      # the GitLab SAST schema. Critical is included for forward compatibility.
+      # No fallback to 0: an unreadable report must fail the gate closed rather
+      # than green-light a dirty repo.
+      COUNTS=$(python3 -c "
+      import json
+      from collections import Counter
+      data = json.load(open('gl-sast-report.json'))
+      vulns = data.get('vulnerabilities', [])
+      c = Counter(v.get('severity', 'Unknown') for v in vulns)
+      blocking = c['Critical'] + c['High']
+      print(len(vulns), blocking, c['Critical'], c['High'], c['Medium'], c['Low'] + c['Info'] + c['Unknown'])
+      ")
+      PARSE_RC=$?
+
+      if [ "$PARSE_RC" -ne 0 ]; then
+        echo "==> Could not parse gl-sast-report.json (rc=${PARSE_RC}). Failing closed."
+        exit 1
+      fi
+
+      set -- $COUNTS
+      TOTAL="$1"; BLOCKING="$2"; CRITICAL="$3"; HIGH="$4"; MEDIUM="$5"; LOW="$6"
+
+      echo "==> Scan complete."
+      echo "    Total:              ${TOTAL}"
+      echo "    Critical:           ${CRITICAL}"
+      echo "    High:               ${HIGH}"
+      echo "    Medium:             ${MEDIUM}"
+      echo "    Low/Info:           ${LOW}"
+      echo "    Blocking (Crit+Hi): ${BLOCKING}"
+
+      if [ "$SEMGREP_FAIL_ON_FINDINGS" != "true" ]; then
+        echo "==> SEMGREP_FAIL_ON_FINDINGS is not 'true' — reporting only."
+        exit 0
+      fi
+
+      if [ "$BLOCKING" -gt 0 ]; then
+        echo "==> Blocking pipeline: ${BLOCKING} Critical/High finding(s)."
+        exit 1
+      fi
+
+      echo "==> No Critical/High findings. Medium and Low/Info do not block."
+      exit 0
   artifacts:
     name: "semgrep-sast-${CI_COMMIT_SHORT_SHA}"
     when: always
